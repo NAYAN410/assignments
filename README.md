@@ -21,7 +21,7 @@ A modern, high-performance Flutter application featuring seamless Firebase Authe
 
 | Welcome Screen | Manual Signup | User Profile |
 | :---: | :---: | :---: |
-| ![Welcome](lib/ss/welcome.png) | ![Signup](lib/ss/signup.png) | ![Profile](lib/ss/profile.png) |
+| ![Welcome](lib/Screenshot_20260130-105956.jpg) | ![Signup](lib/Screenshot_20260130-110012.jpg) | ![Profile](lib/Screenshot_20260130-110035.jpg) |
 
 ---
 
