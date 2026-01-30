@@ -1,160 +1,141 @@
-name: Build Flutter App with iOS Codesigning
+name: Build Flutter App
 
 on:
   workflow_dispatch:
   push:
     branches: [ main, master ]
-    tags:
-      - 'v*'
+  pull_request:
+    branches: [ main, master ]
 
 jobs:
-  setup:
-    name: 🔧 Setup
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.get_version.outputs.version }}
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-
-      - name: Get Version
-        id: get_version
-        run: |
-          if [[ ${{ github.ref }} == refs/tags/* ]]; then
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${{ github.run_number }}" >> $GITHUB_OUTPUT
-          fi
-
   build-android:
-    name: 🤖 Android Build
+    name: 🚀 Android Build
     runs-on: ubuntu-latest
-    needs: setup
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
-
-      - name: Setup Java
-        uses: actions/setup-java@v3
-        with:
-          distribution: 'temurin'
-          java-version: '17'
+        uses: actions/checkout@v4
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
+          flutter-version: '3.x'
           cache: true
-          cache-key: flutter-${{ runner.os }}-stable
 
-      - name: Get Dependencies
+      - name: Install Dependencies
         run: flutter pub get
 
+      - name: Verify Flutter Installation
+        run: flutter doctor -v
+
       - name: Build APK
-        run: flutter build apk --release --build-name=1.0.${{ needs.setup.outputs.version }} --build-number=${{ needs.setup.outputs.version }}
+        run: flutter build apk --release
 
       - name: Build App Bundle
-        run: flutter build appbundle --release --build-name=1.0.${{ needs.setup.outputs.version }} --build-number=${{ needs.setup.outputs.version }}
+        run: flutter build appbundle --release
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v3
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: android-release
-          path: |
-            build/app/outputs/flutter-apk/app-release.apk
-            build/app/outputs/bundle/release/app-release.aab
+          name: android-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 7
+
+      - name: Upload App Bundle Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-appbundle
+          path: build/app/outputs/bundle/release/app-release.aab
+          retention-days: 7
 
   build-ios:
     name: 🍎 iOS Build
     runs-on: macos-latest
-    needs: setup
-    env:
-      APP_VERSION: 1.0.${{ needs.setup.outputs.version }}
-      BUILD_NUMBER: ${{ needs.setup.outputs.version }}
-    
+    needs: build-android
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          cache: true
+          flutter-version: '3.x'
 
-      - name: Get Dependencies
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Verify Flutter Installation
+        run: flutter doctor -v
+
+      - name: Setup CocoaPods
         run: |
-          flutter pub get
           cd ios
+          pod repo update
           pod install
 
-      - name: Set up Xcode
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: latest-stable
+      - name: Build iOS (Debug for Testing)
+        run: flutter build ios --debug --no-codesign
 
-      - name: Build iOS Archive
+      - name: Create IPA Directory Structure
         run: |
-          cd ios
-          xcodebuild -workspace Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -destination generic/platform=iOS \
-            -archivePath $PWD/build/Runner.xcarchive \
-            clean archive
+          mkdir -p build/ios/ipa/Payload
+          cp -r build/ios/iphoneos/Runner.app build/ios/ipa/Payload/
 
-      - name: Export IPA
+      - name: Create IPA File
         run: |
-          cd ios
-          xcodebuild -exportArchive \
-            -archivePath $PWD/build/Runner.xcarchive \
-            -exportOptionsPlist $PWD/ExportOptions.plist \
-            -exportPath $PWD/build \
-            -allowProvisioningUpdates
+          cd build/ios/ipa
+          zip -r app.ipa Payload
 
-      - name: Upload IPA
-        uses: actions/upload-artifact@v3
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: ios-release
-          path: ios/build/Runner.ipa
+          name: ios-ipa
+          path: build/ios/ipa/app.ipa
+          retention-days: 7
 
-  create-release:
-    name: 🚀 Create Release
+  release:
+    name: 📦 Create Release
     runs-on: ubuntu-latest
-    needs: [setup, build-android, build-ios]
+    needs: [build-android, build-ios]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    
     steps:
-      - name: Download Android Artifacts
-        uses: actions/download-artifact@v3
+      - name: Download Android APK Artifact
+        uses: actions/download-artifact@v4
         with:
-          name: android-release
+          name: android-apk
+          path: ./artifacts
+
+      - name: Download Android App Bundle Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-appbundle
+          path: ./artifacts
 
       - name: Download iOS Artifact
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: ios-release
+          name: ios-ipa
+          path: ./artifacts
 
       - name: Create Release
+        id: create_release
         uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v1.0.${{ needs.setup.outputs.version }}
-          name: Release v1.0.${{ needs.setup.outputs.version }}
+          tag_name: v${{ github.run_number }}
+          name: Release v${{ github.run_number }}
           body: |
-            ### 📱 Flutter App Release
-            
-            **Build Details:**
-            - Version: 1.0.${{ needs.setup.outputs.version }}
-            - Commit: ${{ github.sha }}
-            - Date: ${{ github.event.head_commit.timestamp }}
-            
-            **Artifacts:**
-            - Android APK (`app-release.apk`)
-            - Android App Bundle (`app-release.aab`)
-            - iOS IPA (`Runner.ipa`)
-          files: |
-            app-release.apk
-            app-release.aab
-            Runner.ipa
+            ## Flutter App Build
+            - Android APK
+            - Android App Bundle
+            - iOS IPA
+            - Built from: ${{ github.sha }}
+            - Run Number: ${{ github.run_number }}
           draft: false
           prerelease: false
+          files: |
+            artifacts/app-release.apk
+            artifacts/app-release.aab
+            artifacts/app.ipa
