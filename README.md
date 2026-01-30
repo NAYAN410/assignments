@@ -17,13 +17,6 @@ A modern, high-performance Flutter application featuring seamless Firebase Authe
 
 ---
 
-## 📲 Download the App
-
-[![Android Download](https://img.shields.io/badge/Download-Android%20APK-green?style=for-the-badge&logo=android)](https://github.com/shiva/assignments/releases/download/v1.0.0/app-release.apk)
-[![iOS Download](https://img.shields.io/badge/Download-iOS%20IPA-blue?style=for-the-badge&logo=apple)](https://github.com/shiva/assignments/releases/download/v1.0.0/FlutterIpaExport.ipa)
-
----
-
 ## 📸 Screenshots
 
 | Welcome Screen | Manual Signup | User Profile |
@@ -72,6 +65,3 @@ A modern, high-performance Flutter application featuring seamless Firebase Authe
 
 ---
 
-## 📄 License
-
-Distributed under the MIT License. See `LICENSE` for more information.
