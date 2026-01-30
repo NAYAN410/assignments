@@ -1,4 +1,4 @@
-name: Build Flutter App
+name: Build Flutter App with Firebase
 
 on:
   workflow_dispatch:
@@ -8,50 +8,86 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-android:
-    name: 🚀 Android Build
+  setup:
+    name: 🔧 Setup
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Get Version
+        id: get_version
+        run: |
+          if [[ ${{ github.ref }} == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ github.run_number }}" >> $GITHUB_OUTPUT
+          fi
+
+  build-android:
+    name: 🤖 Android Build with Firebase
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          flutter-version: '3.x'
           cache: true
+          cache-key: flutter-${{ runner.os }}-stable
 
-      - name: Install Dependencies
+      - name: Get Dependencies
         run: flutter pub get
 
-      - name: Verify Flutter Installation
-        run: flutter doctor -v
+      - name: Setup Android Firebase
+        run: |
+          # Create google-services.json from secret
+          echo '${{ secrets.GOOGLE_SERVICES_JSON }}' > android/app/google-services.json
+          
+          # Validate JSON format
+          if jq empty android/app/google-services.json 2>/dev/null; then
+            echo "✅ Google Services JSON is valid"
+            echo "Project ID: $(jq -r '.project_info.project_id' android/app/google-services.json)"
+          else
+            echo "❌ Google Services JSON is invalid"
+            exit 1
+          fi
 
       - name: Build APK
-        run: flutter build apk --release
+        run: flutter build apk --release --build-name=1.0.${{ needs.setup.outputs.version }} --build-number=${{ needs.setup.outputs.version }}
 
       - name: Build App Bundle
-        run: flutter build appbundle --release
+        run: flutter build appbundle --release --build-name=1.0.${{ needs.setup.outputs.version }} --build-number=${{ needs.setup.outputs.version }}
 
-      - name: Upload APK Artifact
+      - name: Upload Android Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: android-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
-          retention-days: 7
-
-      - name: Upload App Bundle Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-appbundle
-          path: build/app/outputs/bundle/release/app-release.aab
-          retention-days: 7
+          name: android-artifacts-v${{ needs.setup.outputs.version }}
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/bundle/release/app-release.aab
+          retention-days: 30
+          if-no-files-found: error
 
   build-ios:
-    name: 🍎 iOS Build
+    name: 🍎 iOS Build with Firebase
     runs-on: macos-latest
-    needs: build-android
+    needs: setup
+    env:
+      APP_VERSION: 1.0.${{ needs.setup.outputs.version }}
+      BUILD_NUMBER: ${{ needs.setup.outputs.version }}
+    
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -60,13 +96,29 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-          flutter-version: '3.x'
+          cache: true
 
-      - name: Install Dependencies
-        run: flutter pub get
+      - name: Get Dependencies
+        run: |
+          flutter pub get
 
-      - name: Verify Flutter Installation
-        run: flutter doctor -v
+      - name: Setup iOS Firebase
+        run: |
+          # Create GoogleService-Info.plist from secret
+          echo '${{ secrets.GOOGLE_SERVICES_PLIST }}' > ios/Runner/GoogleService-Info.plist
+          
+          # Validate the PLIST
+          if plutil -lint ios/Runner/GoogleService-Info.plist; then
+            echo "✅ GoogleService-Info.plist is valid"
+            # Extract project info
+            PROJECT_ID=$(plutil -extract PROJECT_ID raw ios/Runner/GoogleService-Info.plist 2>/dev/null || echo "N/A")
+            BUNDLE_ID=$(plutil -extract BUNDLE_ID raw ios/Runner/GoogleService-Info.plist 2>/dev/null || echo "N/A")
+            echo "Project ID: $PROJECT_ID"
+            echo "Bundle ID: $BUNDLE_ID"
+          else
+            echo "❌ GoogleService-Info.plist is invalid"
+            exit 1
+          fi
 
       - name: Setup CocoaPods
         run: |
@@ -74,7 +126,13 @@ jobs:
           pod repo update
           pod install
 
-      - name: Build iOS (Debug for Testing)
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      # Option 1: Build with Flutter (simpler, no codesigning)
+      - name: Build iOS (Debug)
         run: flutter build ios --debug --no-codesign
 
       - name: Create IPA Directory Structure
@@ -87,55 +145,85 @@ jobs:
           cd build/ios/ipa
           zip -r app.ipa Payload
 
-      - name: Upload IPA Artifact
+      # Option 2: Build with Xcode (requires codesigning setup)
+      # - name: Build iOS Archive
+      #   run: |
+      #     cd ios
+      #     xcodebuild -workspace Runner.xcworkspace \
+      #       -scheme Runner \
+      #       -configuration Debug \
+      #       -destination generic/platform=iOS \
+      #       -archivePath $PWD/build/Runner.xcarchive \
+      #       clean archive
+      #
+      # - name: Export IPA
+      #   run: |
+      #     cd ios
+      #     xcodebuild -exportArchive \
+      #       -archivePath $PWD/build/Runner.xcarchive \
+      #       -exportOptionsPlist $PWD/ExportOptions.plist \
+      #       -exportPath $PWD/build \
+      #       -allowProvisioningUpdates
+
+      - name: Upload iOS Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ios-ipa
-          path: build/ios/ipa/app.ipa
-          retention-days: 7
+          name: ios-artifacts-v${{ needs.setup.outputs.version }}
+          path: |
+            build/ios/ipa/app.ipa
+            # ios/build/Runner.ipa # if using Xcode build
+          retention-days: 30
+          if-no-files-found: error
 
-  release:
-    name: 📦 Create Release
+  create-release:
+    name: 🚀 Create Release
     runs-on: ubuntu-latest
-    needs: [build-android, build-ios]
+    needs: [setup, build-android, build-ios]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
     steps:
-      - name: Download Android APK Artifact
+      - name: Download Android Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: android-apk
-          path: ./artifacts
+          name: android-artifacts-v${{ needs.setup.outputs.version }}
+          path: ./release-artifacts
 
-      - name: Download Android App Bundle Artifact
+      - name: Download iOS Artifacts
         uses: actions/download-artifact@v4
         with:
-          name: android-appbundle
-          path: ./artifacts
-
-      - name: Download iOS Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ios-ipa
-          path: ./artifacts
+          name: ios-artifacts-v${{ needs.setup.outputs.version }}
+          path: ./release-artifacts
 
       - name: Create Release
-        id: create_release
         uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: v${{ github.run_number }}
-          name: Release v${{ github.run_number }}
+          tag_name: v1.0.${{ needs.setup.outputs.version }}
+          name: Release v1.0.${{ needs.setup.outputs.version }}
           body: |
-            ## Flutter App Build
-            - Android APK
-            - Android App Bundle
-            - iOS IPA
-            - Built from: ${{ github.sha }}
-            - Run Number: ${{ github.run_number }}
+            ### 📱 Flutter App Release with Firebase
+            
+            **Build Details:**
+            - Version: 1.0.${{ needs.setup.outputs.version }}
+            - Commit: ${{ github.sha }}
+            - Date: ${{ github.event.head_commit.timestamp }}
+            - Run ID: ${{ github.run_id }}
+            
+            **Firebase Configuration:**
+            - ✅ Android: google-services.json configured
+            - ✅ iOS: GoogleService-Info.plist configured
+            
+            **Artifacts:**
+            - Android APK (`app-release.apk`)
+            - Android App Bundle (`app-release.aab`)
+            - iOS IPA (`app.ipa`)
+            
+            **Download Instructions:**
+            1. Android APK: Install directly on Android devices
+            2. Android App Bundle: Upload to Google Play Console
+            3. iOS IPA: For testing purposes only
+          files: |
+            release-artifacts/app-release.apk
+            release-artifacts/app-release.aab
+            release-artifacts/app.ipa
           draft: false
           prerelease: false
-          files: |
-            artifacts/app-release.apk
-            artifacts/app-release.aab
-            artifacts/app.ipa
