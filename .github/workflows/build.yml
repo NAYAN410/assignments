@@ -1,0 +1,233 @@
+name: Build Flutter App (Android + iOS)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-android:
+    name: 🤖 Build Android (Windows Compatible)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          flutter-version: '3.16.0'
+          cache: true
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Setup Firebase for Android
+        run: |
+          # Create google-services.json from GitHub Secret
+          echo '${{ secrets.GOOGLE_SERVICES_JSON }}' > android/app/google-services.json
+          
+          # Verify the file was created
+          if [ -f "android/app/google-services.json" ]; then
+            echo "✅ google-services.json created successfully"
+            
+            # Check if it's valid JSON
+            if python3 -c "import json; json.load(open('android/app/google-services.json'))"; then
+              echo "✅ JSON is valid"
+              
+              # Extract project info
+              PROJECT_ID=$(python3 -c "
+              import json
+              try:
+                  with open('android/app/google-services.json') as f:
+                      data = json.load(f)
+                  print(data.get('project_info', {}).get('project_id', 'Not found'))
+              except:
+                  print('Error reading JSON')
+              ")
+              echo "📱 Project ID: $PROJECT_ID"
+            else
+              echo "❌ Invalid JSON in google-services.json"
+              exit 1
+            fi
+          else
+            echo "❌ Failed to create google-services.json"
+            exit 1
+          fi
+
+      - name: Build APK
+        run: |
+          flutter build apk --release --verbose
+          
+          # List the generated files
+          echo "📁 Generated APK files:"
+          find build/app/outputs/flutter-apk -name "*.apk" -type f
+
+      - name: Build App Bundle
+        run: |
+          flutter build appbundle --release
+          echo "📦 App Bundle created at: build/app/outputs/bundle/release/app-release.aab"
+
+      - name: Upload Android Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-builds
+          path: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/bundle/release/app-release.aab
+          retention-days: 30
+
+  build-ios:
+    name: 🍎 Build iOS (GitHub Actions - macOS)
+    runs-on: macos-latest
+    needs: build-android
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          flutter-version: '3.16.0'
+
+      - name: Install Dependencies
+        run: |
+          flutter pub get
+
+      - name: Setup Firebase for iOS
+        run: |
+          # Create GoogleService-Info.plist from GitHub Secret
+          echo '${{ secrets.GOOGLE_SERVICES_PLIST }}' > ios/Runner/GoogleService-Info.plist
+          
+          # Verify the file was created
+          if [ -f "ios/Runner/GoogleService-Info.plist" ]; then
+            echo "✅ GoogleService-Info.plist created successfully"
+            
+            # Validate PLIST format
+            if plutil -lint ios/Runner/GoogleService-Info.plist; then
+              echo "✅ PLIST format is valid"
+              
+              # Display some info from plist
+              echo "📱 Firebase iOS Config Info:"
+              plutil -p ios/Runner/GoogleService-Info.plist | grep -E "(PROJECT_ID|BUNDLE_ID|GOOGLE_APP_ID)" || true
+            else
+              echo "❌ Invalid PLIST format"
+              exit 1
+            fi
+          else
+            echo "❌ Failed to create GoogleService-Info.plist"
+            exit 1
+          fi
+
+      - name: Install CocoaPods
+        run: |
+          cd ios
+          pod repo update
+          pod install --verbose
+
+      - name: Build iOS (Debug - No Code Signing)
+        run: |
+          flutter build ios --debug --no-codesign --verbose
+
+      - name: Create IPA File
+        run: |
+          cd build/ios/iphoneos
+          
+          # Create Payload directory
+          mkdir -p Payload
+          
+          # Copy the app to Payload
+          if [ -d "Runner.app" ]; then
+            cp -r Runner.app Payload/
+            echo "✅ Runner.app copied to Payload/"
+            
+            # Create IPA file
+            zip -r ../app.ipa Payload
+            
+            echo "✅ IPA created successfully"
+            ls -lh ../app.ipa
+          else
+            echo "❌ Runner.app not found!"
+            ls -la
+            exit 1
+          fi
+
+      - name: Upload iOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-build
+          path: build/ios/app.ipa
+          retention-days: 30
+
+  create-release:
+    name: 📦 Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-android, build-ios]
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    steps:
+      - name: Download Android Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: android-builds
+          path: ./dist
+
+      - name: Download iOS Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-build
+          path: ./dist
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Release v${{ github.run_number }}
+          body: |
+            # Flutter App Release
+            
+            ## 📱 Platform Support
+            - ✅ **Android**: APK and App Bundle
+            - ✅ **iOS**: Debug IPA (Unsigned)
+            
+            ## 📦 Generated Files
+            - **Android APK**: `app-release.apk` - Install on Android devices
+            - **Android App Bundle**: `app-release.aab` - Upload to Play Store
+            - **iOS IPA**: `app.ipa` - Debug build (unsigned)
+            
+            ## 🔧 Build Details
+            - **Build Number**: ${{ github.run_number }}
+            - **Commit**: [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+            - **Workflow Run**: [#${{ github.run_number }}](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            ## ⚠️ Important Notes
+            ### For Android:
+            1. The APK can be installed directly on Android devices
+            2. Enable "Install from unknown sources" if needed
+            
+            ### For iOS:
+            1. This is an **unsigned** debug IPA
+            2. Cannot be installed directly on iOS devices
+            3. For testing on real devices, you need:
+               - Apple Developer Account
+               - Proper provisioning profiles
+               - Code signing certificates
+            
+            ## 🛠️ Local Development (Windows)
+            Since you're developing on Windows:
+            - Build Android APKs locally using `flutter build apk`
+            - iOS builds are automated via GitHub Actions
+            - Test iOS on simulators or use cloud testing services
+            
+            ## 🔍 Firebase Status
+            - ✅ Android Firebase configured via secrets
+            - ✅ iOS Firebase configured via secrets
+          draft: false
+          prerelease: false
+          files: |
+            dist/app-release.apk
+            dist/app-release.aab
+            dist/app.ipa
